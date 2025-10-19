@@ -17,7 +17,7 @@
 //! [`SpanMarker`]: rustc_middle::mir::coverage::CoverageKind::SpanMarker
 
 use rustc_middle::mir::coverage::CoverageKind;
-use rustc_middle::mir::{Body, BorrowKind, CastKind, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::adjustment::PointerCoercion;
 
@@ -25,7 +25,19 @@ pub(super) struct CleanupPostBorrowck;
 
 impl<'tcx> crate::MirPass<'tcx> for CleanupPostBorrowck {
     fn run_pass(&self, _tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        for basic_block in body.basic_blocks.as_mut() {
+        let any_false_edge = body.basic_blocks.iter().any(|basic_block| {
+            matches!(
+                basic_block.terminator().kind,
+                TerminatorKind::FalseEdge { .. } | TerminatorKind::FalseUnwind { .. }
+            )
+        });
+
+        let basic_blocks = if any_false_edge {
+            body.basic_blocks.as_mut()
+        } else {
+            body.basic_blocks.as_mut_preserves_cfg()
+        };
+        for basic_block in basic_blocks.iter_mut() {
             for statement in basic_block.statements.iter_mut() {
                 match statement.kind {
                     StatementKind::AscribeUserType(..)
@@ -59,10 +71,14 @@ impl<'tcx> crate::MirPass<'tcx> for CleanupPostBorrowck {
                     _ => (),
                 }
             }
+
+            // If we change any terminator, we need to ensure that we invalidated the CFG cache.
+            // This is tracked by `any_false_edge` flag above.
             let terminator = basic_block.terminator_mut();
             match terminator.kind {
                 TerminatorKind::FalseEdge { real_target, .. }
                 | TerminatorKind::FalseUnwind { real_target, .. } => {
+                    debug_assert!(any_false_edge);
                     terminator.kind = TerminatorKind::Goto { target: real_target };
                 }
                 _ => {}
